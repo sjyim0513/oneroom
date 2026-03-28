@@ -32,6 +32,7 @@ interface RightPanelProps {
   ) => void;
   onVertexChange: (vertexId: string, nextPoint: Point2D) => void;
   onDeleteSurface: () => void;
+  onDeleteConnectedGroup: () => void;
   onDisconnectConnection: (connectionId: string) => void;
 }
 
@@ -46,6 +47,7 @@ export function RightPanel({
   onDimensionChange,
   onVertexChange,
   onDeleteSurface,
+  onDeleteConnectedGroup,
   onDisconnectConnection,
 }: RightPanelProps) {
   if (!selectedSurface || !dimensionValues) {
@@ -127,13 +129,22 @@ export function RightPanel({
             />
           </div>
 
-          <button
-            type="button"
-            onClick={onDeleteSurface}
-            className="w-full rounded-2xl border border-[#d9b6ad] bg-[#fff4f0] px-4 py-3 text-sm font-semibold text-[#94422c] transition hover:bg-[#fee7e0]"
-          >
-            면 삭제
-          </button>
+          <div className="grid gap-2">
+            <button
+              type="button"
+              onClick={onDeleteSurface}
+              className="w-full rounded-2xl border border-[#d9b6ad] bg-[#fff4f0] px-4 py-3 text-sm font-semibold text-[#94422c] transition hover:bg-[#fee7e0]"
+            >
+              선택한 면 삭제
+            </button>
+            <button
+              type="button"
+              onClick={onDeleteConnectedGroup}
+              className="w-full rounded-2xl border border-[#d5b4a2] bg-[#fdf1e8] px-4 py-3 text-sm font-semibold text-[#8a4a2f] transition hover:bg-[#f9e6da]"
+            >
+              연결된 오브젝트 전체 삭제
+            </button>
+          </div>
         </section>
 
         <section className="space-y-3 rounded-[22px] border border-[var(--panel-border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.95),rgba(248,244,236,0.8))] p-4">

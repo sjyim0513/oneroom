@@ -74,6 +74,7 @@ export function SurfacePlanner() {
     saveSelectedSurfaceToLibrary,
     loadSurfaceFromLibrary,
     deleteSurface,
+    deleteConnectedGroup,
     removeConnection,
     cutSurface,
     undo,
@@ -239,8 +240,8 @@ export function SurfacePlanner() {
               const success = cutSurface(cutTargetId, cutCutterId);
               setCutFeedback(
                 success
-                  ? "기준 면에 개구부가 만들어졌어요."
-                  : "이 기능은 단순한 포함 형태나 볼록한 겹침 형태에서만 동작해요.",
+                  ? "기준 면 외곽선을 잘라낸 모양으로 업데이트했어요."
+                  : "지금은 겹친 결과가 하나의 바깥 윤곽으로 남는 직교 면만 잘라낼 수 있어요.",
               );
             }}
             cutFeedback={cutFeedback}
@@ -256,7 +257,7 @@ export function SurfacePlanner() {
                 </p>
                 <p className="text-sm text-[var(--text-muted)]">
                   {currentViewMode === "2d"
-                    ? "면을 드래그하고 정점을 움직여 서로 연결하거나 연결을 해제해 보세요."
+                    ? "면을 드래그하고 정점을 움직여 서로 연결하고, 길이와 겹침 정보도 바로 확인해 보세요."
                     : "같은 면 데이터를 두께까지 포함한 3D로 확인할 수 있어요."}
                 </p>
               </div>
@@ -353,6 +354,21 @@ export function SurfacePlanner() {
               }
 
               deleteSurface(selectedSurface.id);
+            }}
+            onDeleteConnectedGroup={() => {
+              if (!selectedSurface) {
+                return;
+              }
+
+              const shouldDelete = window.confirm(
+                `"${selectedSurface.name}"이 포함된 연결 오브젝트 전체를 삭제할까요?`,
+              );
+
+              if (!shouldDelete) {
+                return;
+              }
+
+              deleteConnectedGroup(selectedSurface.id);
             }}
             onDisconnectConnection={(connectionId) => {
               removeConnection(connectionId);

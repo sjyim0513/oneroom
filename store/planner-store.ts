@@ -3,7 +3,7 @@
 import { create } from "zustand";
 import { v4 as uuid } from "uuid";
 
-import { buildBooleanCutHole } from "@/lib/geometry/boolean-cut";
+import { subtractPolygonToOuterBoundary } from "@/lib/geometry/boolean-cut";
 import {
   getConnectedSurfaceGroup,
   moveSurfaceGroup,
@@ -123,6 +123,7 @@ interface PlannerState {
   saveSelectedSurfaceToLibrary: (label?: string) => void;
   loadSurfaceFromLibrary: (libraryItemId: string) => void;
   deleteSurface: (surfaceId: string) => void;
+  deleteConnectedGroup: (surfaceId: string) => void;
   removeConnection: (connectionId: string) => void;
   cutSurface: (targetSurfaceId: string, cutterSurfaceId: string) => boolean;
   undo: () => void;
@@ -607,16 +608,34 @@ export const usePlannerStore = create<PlannerState>((set, get) => ({
 
   deleteSurface: (surfaceId) => {
     const state = get();
+    const nextSnapshot = buildDeletionSnapshot(state, [surfaceId]);
+
+    if (!nextSnapshot) {
+      return;
+    }
+
     const previousSnapshot = createSceneHistorySnapshot(state);
-    const nextSnapshot = createSceneHistorySnapshot({
-      surfaces: state.surfaces.filter((surface) => surface.id !== surfaceId),
-      connections: state.connections.filter(
-        (connection) =>
-          connection.surfaceAId !== surfaceId && connection.surfaceBId !== surfaceId,
-      ),
-      selectedSurfaceId:
-        state.selectedSurfaceId === surfaceId ? null : state.selectedSurfaceId,
-    });
+
+    set((currentState) => commitSceneSnapshot(currentState, previousSnapshot, nextSnapshot));
+    persistCurrentScene(get());
+  },
+
+  deleteConnectedGroup: (surfaceId) => {
+    const state = get();
+    const targetSurface = state.surfaces.find((surface) => surface.id === surfaceId);
+
+    if (!targetSurface) {
+      return;
+    }
+
+    const connectedGroupIds = getConnectedSurfaceGroup(surfaceId, state.connections);
+    const nextSnapshot = buildDeletionSnapshot(state, connectedGroupIds);
+
+    if (!nextSnapshot) {
+      return;
+    }
+
+    const previousSnapshot = createSceneHistorySnapshot(state);
 
     set((currentState) => commitSceneSnapshot(currentState, previousSnapshot, nextSnapshot));
     persistCurrentScene(get());
@@ -646,30 +665,25 @@ export const usePlannerStore = create<PlannerState>((set, get) => ({
       return false;
     }
 
-    const holeVertices = buildBooleanCutHole(target, cutter);
+    const rebuiltOuterBoundary = subtractPolygonToOuterBoundary(target, cutter);
 
-    if (!holeVertices) {
+    if (!rebuiltOuterBoundary) {
       return false;
     }
 
+    const rebuiltTarget = rebuildSurfaceFromAbsoluteBoundary(target, rebuiltOuterBoundary);
     const previousSnapshot = createSceneHistorySnapshot(state);
+    const nextSurfaces = state.surfaces.map((surface) =>
+      surface.id === targetSurfaceId ? rebuiltTarget : surface,
+    );
+    const nextConnections = remapConnectionsForRebuiltSurface(
+      state.connections,
+      target,
+      rebuiltTarget,
+    );
     const nextSnapshot = createSceneHistorySnapshot({
-      surfaces: state.surfaces.map((surface) =>
-        surface.id === targetSurfaceId
-          ? {
-              ...surface,
-              holes: [
-                ...surface.holes,
-                {
-                  id: uuid(),
-                  vertices: holeVertices,
-                },
-              ],
-              updatedAt: new Date().toISOString(),
-            }
-          : surface,
-      ),
-      connections: state.connections,
+      surfaces: nextSurfaces,
+      connections: nextConnections,
       selectedSurfaceId: targetSurfaceId,
     });
 
@@ -843,6 +857,34 @@ function createSceneHistorySnapshot(source: {
   ) as SceneHistorySnapshot;
 }
 
+function buildDeletionSnapshot(
+  state: Pick<PlannerState, "surfaces" | "connections" | "selectedSurfaceId">,
+  surfaceIds: string[],
+) {
+  const removableIdSet = new Set(
+    surfaceIds.filter((surfaceId) =>
+      state.surfaces.some((surface) => surface.id === surfaceId),
+    ),
+  );
+
+  if (removableIdSet.size === 0) {
+    return null;
+  }
+
+  return createSceneHistorySnapshot({
+    surfaces: state.surfaces.filter((surface) => !removableIdSet.has(surface.id)),
+    connections: state.connections.filter(
+      (connection) =>
+        !removableIdSet.has(connection.surfaceAId) &&
+        !removableIdSet.has(connection.surfaceBId),
+    ),
+    selectedSurfaceId:
+      state.selectedSurfaceId && removableIdSet.has(state.selectedSurfaceId)
+        ? null
+        : state.selectedSurfaceId,
+  });
+}
+
 function restoreSceneSnapshot(snapshot: SceneHistorySnapshot) {
   return {
     surfaces: snapshot.surfaces,
@@ -912,6 +954,124 @@ function persistCurrentScene(state: PlannerState) {
     library: state.library,
     lastSavedAt: state.lastSavedAt,
   });
+}
+
+function rebuildSurfaceFromAbsoluteBoundary(
+  surface: Surface,
+  absoluteBoundary: Point2D[],
+): Surface {
+  const vertices = absoluteBoundary.map((point, index) => ({
+    id: `v${index + 1}`,
+    x: point.x - surface.position.x,
+    y: point.y - surface.position.y,
+  }));
+
+  return {
+    ...surface,
+    vertices,
+    holes: [],
+    dimensions: dimensionsFromVertices(vertices, surface.dimensions.thickness),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function remapConnectionsForRebuiltSurface(
+  connections: Connection[],
+  previousSurface: Surface,
+  rebuiltSurface: Surface,
+) {
+  const nextVertexByPoint = new Map(
+    rebuiltSurface.vertices.map((vertex) => [
+      pointKey({
+        x: vertex.x + rebuiltSurface.position.x,
+        y: vertex.y + rebuiltSurface.position.y,
+      }),
+      vertex.id,
+    ]),
+  );
+  const nextConnections: Connection[] = [];
+  const seenConnectionKeys = new Set<string>();
+
+  for (const connection of connections) {
+    let candidate = connection;
+
+    if (connection.surfaceAId === previousSurface.id) {
+      const nextVertexId = findMappedVertexId(
+        previousSurface,
+        connection.vertexAId,
+        nextVertexByPoint,
+      );
+
+      if (!nextVertexId) {
+        continue;
+      }
+
+      candidate = {
+        ...candidate,
+        vertexAId: nextVertexId,
+      };
+    }
+
+    if (connection.surfaceBId === previousSurface.id) {
+      const nextVertexId = findMappedVertexId(
+        previousSurface,
+        connection.vertexBId,
+        nextVertexByPoint,
+      );
+
+      if (!nextVertexId) {
+        continue;
+      }
+
+      candidate = {
+        ...candidate,
+        vertexBId: nextVertexId,
+      };
+    }
+
+    const dedupeKey = [
+      candidate.surfaceAId,
+      candidate.vertexAId,
+      candidate.surfaceBId,
+      candidate.vertexBId,
+    ].join(":");
+
+    if (seenConnectionKeys.has(dedupeKey)) {
+      continue;
+    }
+
+    seenConnectionKeys.add(dedupeKey);
+    nextConnections.push(candidate);
+  }
+
+  return nextConnections;
+}
+
+function findMappedVertexId(
+  surface: Surface,
+  vertexId: string,
+  nextVertexByPoint: Map<string, string>,
+) {
+  const absoluteVertex = getAbsoluteSurfaceVertex(surface, vertexId);
+
+  if (!absoluteVertex) {
+    return null;
+  }
+
+  return nextVertexByPoint.get(
+    pointKey({
+      x: absoluteVertex.x,
+      y: absoluteVertex.y,
+    }),
+  ) ?? null;
+}
+
+function pointKey(point: Point2D) {
+  return `${roundPointValue(point.x)}:${roundPointValue(point.y)}`;
+}
+
+function roundPointValue(value: number) {
+  return Math.round(value * 1_000_000);
 }
 
 export function getSurfaceDisplayDimensions(surface: Surface) {

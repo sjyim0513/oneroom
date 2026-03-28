@@ -4,7 +4,8 @@ import { useRef, useState } from "react";
 import { Circle, Group, Layer, Line, Rect, Stage, Text } from "react-konva";
 
 import { getBoundingBox } from "@/lib/geometry/polygon";
-import type { Point2D, SnapGuide, Surface } from "@/lib/types/planner";
+import { fromMeters } from "@/lib/geometry/units";
+import type { Point2D, SnapGuide, Surface, Unit, Vertex } from "@/lib/types/planner";
 
 import { useElementSize } from "./use-element-size";
 
@@ -31,8 +32,8 @@ interface ViewportState {
   scale: number;
 }
 
-interface HoveredVertexState {
-  vertexId: string;
+interface HoverOverlayState {
+  label: string;
   screenX: number;
   screenY: number;
 }
@@ -45,6 +46,7 @@ const MIN_VIEWPORT_SCALE = 0.35;
 const MAX_VIEWPORT_SCALE = 4;
 const ZOOM_SENSITIVITY = 0.0015;
 const VERTEX_HOVER_THRESHOLD = 16;
+const EDGE_HOVER_THRESHOLD = 12;
 
 export function SurfaceStage2D({
   surfaces,
@@ -66,7 +68,7 @@ export function SurfaceStage2D({
   });
   const [isPanning, setIsPanning] = useState(false);
   const [isDraggingShape, setIsDraggingShape] = useState(false);
-  const [hoveredVertex, setHoveredVertex] = useState<HoveredVertexState | null>(null);
+  const [hoverOverlay, setHoverOverlay] = useState<HoverOverlayState | null>(null);
   const panStateRef = useRef<{
     pointerX: number;
     pointerY: number;
@@ -82,18 +84,25 @@ export function SurfaceStage2D({
   const selectedSurface =
     surfaces.find((surface) => surface.id === selectedSurfaceId) ?? null;
 
-  const updateHoveredVertex = (
+  const updateHoverOverlay = (
     pointer: Point2D | null | undefined,
     nextViewport: ViewportState = viewport,
   ) => {
-    if (!pointer || isPanning || isDraggingShape || !selectedSurface) {
-      setHoveredVertex(null);
+    if (!pointer || isPanning || isDraggingShape) {
+      setHoverOverlay(null);
       return;
     }
 
-    setHoveredVertex(
-      findHoveredVertex(pointer, selectedSurface, nextViewport, centerX, centerY),
-    );
+    const hoveredVertex = selectedSurface
+      ? findHoveredVertex(pointer, selectedSurface, nextViewport, centerX, centerY)
+      : null;
+
+    if (hoveredVertex) {
+      setHoverOverlay(hoveredVertex);
+      return;
+    }
+
+    setHoverOverlay(findHoveredEdge(pointer, surfaces, nextViewport, centerX, centerY));
   };
 
   return (
@@ -142,7 +151,7 @@ export function SurfaceStage2D({
               return nextViewportState;
             });
 
-            updateHoveredVertex(pointer, nextViewportState ?? viewport);
+            updateHoverOverlay(pointer, nextViewportState ?? viewport);
           }}
           onMouseDown={(event) => {
             if (event.target === event.target.getStage()) {
@@ -160,7 +169,7 @@ export function SurfaceStage2D({
                 offsetY: viewport.offsetY,
               };
               setIsPanning(true);
-              setHoveredVertex(null);
+              setHoverOverlay(null);
               onSelectSurface(null);
             }
           }}
@@ -170,7 +179,7 @@ export function SurfaceStage2D({
             const panState = panStateRef.current;
 
             if (!pointer) {
-              setHoveredVertex(null);
+              setHoverOverlay(null);
               return;
             }
 
@@ -182,11 +191,11 @@ export function SurfaceStage2D({
               };
 
               setViewport(nextViewportState);
-              setHoveredVertex(null);
+              setHoverOverlay(null);
               return;
             }
 
-            updateHoveredVertex(pointer);
+            updateHoverOverlay(pointer);
           }}
           onMouseUp={() => {
             panStateRef.current = null;
@@ -195,7 +204,7 @@ export function SurfaceStage2D({
           onMouseLeave={() => {
             panStateRef.current = null;
             setIsPanning(false);
-            setHoveredVertex(null);
+            setHoverOverlay(null);
           }}
         >
           <Layer>
@@ -232,7 +241,7 @@ export function SurfaceStage2D({
                     onTap={() => onSelectSurface(surface.id)}
                     onDragStart={() => {
                       setIsDraggingShape(true);
-                      setHoveredVertex(null);
+                      setHoverOverlay(null);
                       onBeginSurfaceMove(surface.id);
                     }}
                     onDragMove={(event) => {
@@ -292,7 +301,7 @@ export function SurfaceStage2D({
                             }}
                             onDragStart={() => {
                               setIsDraggingShape(true);
-                              setHoveredVertex(null);
+                              setHoverOverlay(null);
                               onBeginVertexMove(surface.id, vertex.id);
                             }}
                             onDragMove={(event) => {
@@ -345,16 +354,16 @@ export function SurfaceStage2D({
         </Stage>
       ) : null}
 
-      {hoveredVertex ? (
+      {hoverOverlay ? (
         <div
           className="pointer-events-none absolute z-10 rounded-lg border border-[rgba(33,29,26,0.12)] bg-white/95 px-2 py-1 text-[11px] font-medium text-ink-900 shadow-[0_6px_18px_rgba(33,29,26,0.08)]"
           style={{
-            left: hoveredVertex.screenX + 12,
-            top: hoveredVertex.screenY - 28,
+            left: hoverOverlay.screenX + 12,
+            top: hoverOverlay.screenY - 28,
             transform: "translate3d(0,0,0)",
           }}
         >
-          {hoveredVertex.vertexId}
+          {hoverOverlay.label}
         </div>
       ) : null}
 
@@ -382,13 +391,13 @@ function findHoveredVertex(
   viewport: ViewportState,
   centerX: number,
   centerY: number,
-): HoveredVertexState | null {
+): HoverOverlayState | null {
   const viewportOrigin = {
     x: centerX + viewport.offsetX,
     y: centerY + viewport.offsetY,
   };
 
-  let nearestVertex: HoveredVertexState | null = null;
+  let nearestVertex: HoverOverlayState | null = null;
   let nearestDistance = Number.POSITIVE_INFINITY;
 
   for (const vertex of surface.vertices) {
@@ -408,13 +417,86 @@ function findHoveredVertex(
 
     nearestDistance = distance;
     nearestVertex = {
-      vertexId: vertex.id,
+      label: vertex.id,
       screenX: screenPoint.x,
       screenY: screenPoint.y,
     };
   }
 
   return nearestVertex;
+}
+
+function findHoveredEdge(
+  pointer: Point2D,
+  surfaces: Surface[],
+  viewport: ViewportState,
+  centerX: number,
+  centerY: number,
+): HoverOverlayState | null {
+  const viewportOrigin = {
+    x: centerX + viewport.offsetX,
+    y: centerY + viewport.offsetY,
+  };
+
+  let nearestEdge: HoverOverlayState | null = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  for (const surface of surfaces) {
+    const loops = [surface.vertices, ...surface.holes.map((hole) => hole.vertices)];
+
+    for (const loop of loops) {
+      for (const edge of getLoopEdges(loop)) {
+        const startWorld = {
+          x: surface.position.x + edge.start.x,
+          y: surface.position.y + edge.start.y,
+        };
+        const endWorld = {
+          x: surface.position.x + edge.end.x,
+          y: surface.position.y + edge.end.y,
+        };
+        const startScreen = worldToScreenPoint(startWorld, viewportOrigin, viewport.scale);
+        const endScreen = worldToScreenPoint(endWorld, viewportOrigin, viewport.scale);
+        const distance = distanceToSegment(pointer, startScreen, endScreen);
+
+        if (distance > EDGE_HOVER_THRESHOLD || distance >= nearestDistance) {
+          continue;
+        }
+
+        nearestDistance = distance;
+        nearestEdge = {
+          label: formatEdgeLength(edge.lengthMeters, surface.unit),
+          screenX: (startScreen.x + endScreen.x) / 2,
+          screenY: (startScreen.y + endScreen.y) / 2,
+        };
+      }
+    }
+  }
+
+  return nearestEdge;
+}
+
+function getLoopEdges(vertices: Vertex[]) {
+  if (vertices.length < 2) {
+    return [];
+  }
+
+  return vertices.map((start, index) => {
+    const end = vertices[(index + 1) % vertices.length];
+
+    return {
+      start,
+      end,
+      lengthMeters: Math.hypot(end.x - start.x, end.y - start.y),
+    };
+  });
+}
+
+function formatEdgeLength(lengthMeters: number, unit: Unit) {
+  const convertedLength = fromMeters(lengthMeters, unit);
+  const digits = unit === "inch" ? 1 : 2;
+  const label = unit === "inch" ? "인치" : "미터";
+
+  return `${convertedLength.toFixed(digits)} ${label}`;
 }
 
 function worldToScreenPoint(
@@ -426,6 +508,30 @@ function worldToScreenPoint(
     x: viewportOrigin.x + point.x * PIXELS_PER_METER * scale,
     y: viewportOrigin.y + point.y * PIXELS_PER_METER * scale,
   };
+}
+
+function distanceToSegment(point: Point2D, start: Point2D, end: Point2D) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSquared = dx * dx + dy * dy;
+
+  if (lengthSquared <= 1e-9) {
+    return Math.hypot(point.x - start.x, point.y - start.y);
+  }
+
+  const projection = Math.max(
+    0,
+    Math.min(
+      1,
+      ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared,
+    ),
+  );
+  const projectedPoint = {
+    x: start.x + dx * projection,
+    y: start.y + dy * projection,
+  };
+
+  return Math.hypot(point.x - projectedPoint.x, point.y - projectedPoint.y);
 }
 
 function renderGrid() {
